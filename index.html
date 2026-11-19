@@ -930,7 +930,7 @@ function render() {
 
 function templateNotice() {
   if (!S.program.isTemplate) return '';
-  return `<div class="notice"><b>Starter template loaded.</b> Open your setup link to load your program, or use <b>Program → Edit as text</b> to type one in. Progression, rest times and records all follow whatever you enter.</div>`;
+  return `<div class="notice"><b>Starter template loaded.</b> Have a setup code? Enter it to load your program, or use <b>Program → Edit as text</b> to type one in.</div><div class="row" style="margin-top:10px"><button class="btn sm primary" data-act="setup-code" id="setup-code-btn">Enter setup code</button> Progression, rest times and records all follow whatever you enter.</div>`;
 }
 function viewTrainHome() {
   const days = S.program.days;
@@ -1080,7 +1080,7 @@ function viewProgram() {
     <div class="eyebrow">Current program</div>
     <h2 class="h2">${esc(p.name)}</h2>
     <div class="muted small num">Week ${currentWeek()}${p.weeks ? ' of ' + p.weeks : ''} · ${perWeek()} sessions/week · ${p.days.length} day rotation${num(p.deloadEvery) ? ' · deload every ' + p.deloadEvery + 'th week' : ''}${(p.deloadWeeks || []).length ? ' · deload weeks ' + p.deloadWeeks.join(', ') : ''}</div>
-    <div class="row"><button class="btn sm primary" data-act="prog-text">Edit as text</button><button class="btn sm" data-act="prog-meta">Program details</button><button class="btn sm" data-act="prog-restart">Restart at week 1</button></div>
+    <div class="row"><button class="btn sm primary" data-act="prog-text">Edit as text</button><button class="btn sm" data-act="prog-meta">Program details</button><button class="btn sm" data-act="prog-restart">Restart at week 1</button><button class="btn sm" data-act="setup-code">Setup code</button></div>
   </section>
   ${days}
   <button class="btn block" data-act="day-add">+ Add day</button>
@@ -1439,20 +1439,61 @@ function importFromHash() {
     const b = atob(m[1].replace(/-/g, '+').replace(/_/g, '/'));
     d = JSON.parse(new TextDecoder().decode(Uint8Array.from(b, c => c.charCodeAt(0))));
   } catch (e) { clear(); toast('That setup link is incomplete. Copy the whole link and try again.'); return; }
+  applyPayload(d, clear);
+}
+function applyPayload(d, done = () => {}) {
   const { days, errors } = parseProgramText(d.text || '', S.settings.unit);
-  if (errors.length || !days.length) { clear(); toast('That setup link has no program in it.'); return; }
+  if (errors.length || !days.length) { done(); toast('That setup has no program in it.'); return; }
   const apply = () => {
     S.program = { id: uid(), name: d.name || 'My program', isTemplate: false, weeks: d.weeks || null, perWeek: d.perWeek || days.length,
       deloadWeeks: d.deloadWeeks || [], deloadEvery: d.deloadEvery || null, startedAt: 0, days };
-    touchProfile(); clear(); UI.tab = 'train'; render(); toast('Loaded ' + S.program.name);
+    touchProfile(); done(); UI.tab = 'train'; render(); window.scrollTo(0, 0); toast('Loaded ' + S.program.name);
   };
   if (S.program.isTemplate && !S.workouts.length) { apply(); return; }
   openSheet(`<div class="stack"><div class="h3">Load ${esc(d.name || 'this program')}?</div>
     <div class="muted">It replaces your current program (${esc(S.program.name)}). Logged workouts and records are kept.</div></div>
     <div class="row"><button class="btn spacer" data-act="no">Keep current</button><button class="btn primary spacer" data-act="yes">Load program</button></div>`,
-    { yes: () => { closeSheet(); apply(); }, no: () => { closeSheet(); clear(); } });
+    { yes: () => { closeSheet(); apply(); }, no: () => { closeSheet(); done(); } });
 }
 window.addEventListener('hashchange', importFromHash);
+
+/* ---------- setup code: decrypts setup/<id>.json, which holds an AES-GCM encrypted program ---------- */
+const normCode = c => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const b64bytes = s => Uint8Array.from(atob(s), ch => ch.charCodeAt(0));
+async function codeId(code) {
+  const h = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('logbook-id:' + code)));
+  return [...h.slice(0, 8)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+async function loadSetupCode(raw) {
+  const code = normCode(raw);
+  if (code.length < 8) throw new Error('short');
+  if (!window.crypto || !crypto.subtle) throw new Error('nocrypto');
+  const res = await fetch('setup/' + await codeId(code) + '.json', { cache: 'no-store' });
+  if (res.status === 404) throw new Error('notfound');
+  if (!res.ok) throw new Error('network');
+  const box = await res.json();
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(code), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', salt: b64bytes(box.salt), iterations: box.iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64bytes(box.iv) }, key, b64bytes(box.ct));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+ACTS['setup-code'] = () => {
+  openSheet(`<div class="stack"><div class="h3">Enter setup code</div><div class="muted small">Loads your program onto this device. Needs a connection the first time.</div></div>
+    <div class="field"><label for="sc-in">Setup code</label><input id="sc-in" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX" style="text-transform:uppercase;letter-spacing:.12em;font-family:var(--font-display);font-size:22px;text-align:center"></div>
+    <div class="err" id="sc-err"></div>
+    <button class="btn primary block" data-act="go" id="sc-go">Load program</button>`,
+    {
+      go: async el => {
+        const err = $('#sc-err'); err.textContent = ''; el.disabled = true; el.textContent = 'Loading…';
+        try { const d = await loadSetupCode($('#sc-in').value); closeSheet(); applyPayload(d); }
+        catch (e) {
+          el.disabled = false; el.textContent = 'Load program';
+          err.textContent = { short: 'Codes are 8 letters and numbers.', notfound: 'No program matches that code. Check for typos.', network: 'Couldn’t reach the site. Check your connection and try again.', nocrypto: 'This browser can’t unlock setup codes.' }[e.message] || 'That code didn’t unlock the program. Check for typos.';
+        }
+      }
+    });
+  setTimeout(() => { const i = $('#sc-in'); i && i.focus(); }, 50);
+};
 
 /* ---------- boot ---------- */
 loadLocal();
