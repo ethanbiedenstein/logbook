@@ -319,6 +319,12 @@ textarea.ta { min-height: 260px; font-family: ui-monospace, "SF Mono", Menlo, Co
 .rpe-opt.sel { outline: 3px solid var(--fg); outline-offset: 1px; }
 .legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+.swaplist { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.swapopt { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 50px; padding: 8px 14px; background: var(--surface-2); border: 0; border-top: 1px solid var(--line); text-align: left; font-weight: 600; font-size: 15px; }
+.swapopt:first-child { border-top: 0; }
+.swapopt span { min-width: 0; }
+.swapopt small { color: var(--muted); font-weight: 500; font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.swapopt:active { background: var(--accent-soft); }
 .pr-list { display: flex; flex-direction: column; gap: 6px; }
 .pr { display: flex; gap: 10px; align-items: baseline; font-size: 15px; }
 .pr b { font-family: var(--font-display); font-size: 20px; }
@@ -609,12 +615,14 @@ function stepFor(inc) { const r = S.settings.round || (S.settings.unit === 'kg' 
 function roundTo(x, step) { return Math.round(x / step) * step; }
 function workingSets(ex) { return (ex.sets || []).filter(s => s.done && num(s.reps) != null); }
 function sortedWorkouts() { return [...S.workouts].sort((a, b) => b.date - a.date); }
-function historyFor(key) {
+// Lifts that appear on several days (calf raises, crunches) progress per day: prefer that day's history.
+function historyFor(key, dayName) {
   const out = [];
   for (const w of sortedWorkouts()) {
     if (w.deload) continue;
     for (const ex of w.exercises) if (ex.key === key && workingSets(ex).length) { out.push({ w, ex }); break; }
   }
+  if (dayName) { const same = out.filter(x => x.w.dayName === dayName); if (same.length) return same; }
   return out;
 }
 function evalSession(ex, tgt) {
@@ -629,8 +637,8 @@ function evalSession(ex, tgt) {
   const missed = topSets.some(s => num(s.reps) < tgt.repMin) || (hasT && maxRpe != null && maxRpe >= tgt.rpe + 1.5);
   return { top, allMax, rpeOk, missed };
 }
-function suggest(pe) {
-  const h = historyFor(exKey(pe.name));
+function suggest(pe, dayName) {
+  const h = historyFor(exKey(pe.name), dayName);
   if (!h.length) {
     if (pe.start) return { w: pe.start, why: 'Starting weight', cls: '' };
     return { w: null, why: pe.rpe != null
@@ -654,13 +662,13 @@ function suggest(pe) {
   if (e0.missed) {
     const e1 = h[1] ? evalSession(h[1].ex, pe) : null;
     if (e1 && e1.missed && e1.top === e0.top) return { w: roundTo(e0.top * 0.9, step), why: 'Missed the range twice in a row → reset 10%', cls: 'down' };
-    return { w: e0.top, why: 'Below the rep range → repeat this weight', cls: 'down' };
+    return { w: e0.top, why: 'Short of the target reps → repeat this weight', cls: 'down' };
   }
   if (e0.allMax && !e0.rpeOk) return { w: e0.top, why: 'Top of range but RPE ran high → repeat, aim for lower RPE', cls: '' };
   return { w: e0.top, why: 'In range → same weight, beat last time’s reps', cls: '' };
 }
-function lastSummary(key) {
-  const h = historyFor(key)[0] || (() => { for (const w of sortedWorkouts()) for (const ex of w.exercises) if (ex.key === key && workingSets(ex).length) return { w, ex }; return null; })();
+function lastSummary(key, dayName) {
+  const h = historyFor(key, dayName)[0] || (() => { for (const w of sortedWorkouts()) for (const ex of w.exercises) if (ex.key === key && workingSets(ex).length) return { w, ex }; return null; })();
   if (!h) return '';
   const sets = workingSets(h.ex).map(s => `${num(s.w) ? fmtN(num(s.w)) : 'BW'}×${s.reps}${num(s.rpe) != null ? ' @' + s.rpe : ''}`);
   return `${fmtDate(h.w.date)}: ${sets.join(', ')}`;
@@ -706,8 +714,8 @@ function nextDayIdx() {
 }
 
 /* ---------- workouts ---------- */
-function buildActiveExercise(pe, deload) {
-  const sg = suggest(pe);
+function buildActiveExercise(pe, deload, dayName) {
+  const sg = suggest(pe, dayName);
   let sets = pe.sets, w = sg.w, why = sg.why, cls = sg.cls, rpe = pe.rpe;
   if (deload) { sets = Math.max(1, Math.round(pe.sets * 0.6)); rpe = deloadRpe(pe.rpe); if (w) { w = roundTo(w * 0.9, stepFor(pe.inc)); } why = 'Deload week: ~90% load, fewer sets, stop well short of failure'; cls = ''; }
   return {
@@ -715,7 +723,7 @@ function buildActiveExercise(pe, deload) {
     prog: pe.prog || 'double', progWeeks: pe.progWeeks || 4,
     rest: pe.rest || S.settings.defaultRest, note: pe.note || '',
     target: { sets, repMin: pe.repMin, repMax: pe.repMax, rpe },
-    suggestion: { w, why, cls }, last: lastSummary(exKey(pe.name)),
+    suggestion: { w, why, cls }, last: lastSummary(exKey(pe.name), dayName),
     sets: Array.from({ length: sets }, () => ({ w: '', reps: '', rpe: '', done: false }))
   };
 }
@@ -726,7 +734,7 @@ function startWorkout(dayIdx) {
   S.active = {
     id: uid(), startedAt: Date.now(), programId: S.program.id, programName: S.program.name,
     dayId: day.id, dayIdx, dayName: day.name, week: wk, deload,
-    exercises: day.exercises.map(pe => buildActiveExercise(pe, deload)), notes: ''
+    exercises: day.exercises.map(pe => buildActiveExercise(pe, deload, day.name)), notes: ''
   };
   UI.dayIdx = null; persistActive(); requestWake(); render(); window.scrollTo(0, 0);
 }
@@ -941,7 +949,7 @@ function viewTrainHome() {
   const wk = currentWeek(); const deload = isDeload(wk);
   const doneThisWeek = programWorkouts().length % perWeek();
   const rows = day.exercises.map(pe => {
-    const sg = suggest(pe);
+    const sg = suggest(pe, day.name);
     const sets = deload ? Math.max(1, Math.round(pe.sets * 0.6)) : pe.sets;
     const w = sg.w != null ? (deload ? roundTo(sg.w * 0.9, stepFor(pe.inc)) : sg.w) : null;
     return `<div class="dayrow"><div class="nm">${esc(pe.name)}</div>
@@ -987,7 +995,7 @@ function viewActive() {
       ${ex.last ? `<div class="last num">Last: ${esc(ex.last)}</div>` : ''}
       ${ex.note ? `<div class="note">${esc(ex.note)}</div>` : ''}
       <div class="sets"><div class="set-head"><span>Set</span><span style="text-align:center">${unitLbl()}</span><span style="text-align:center">Reps</span><span>RPE</span><span></span></div>${rows}</div>
-      <div class="ex-foot"><button class="btn sm" data-act="add-set" data-ei="${ei}">+ Add set</button><button class="btn sm" data-act="rest-now" data-ei="${ei}">Start rest</button></div>
+      <div class="ex-foot"><button class="btn sm" data-act="add-set" data-ei="${ei}">+ Set</button><button class="btn sm" data-act="swap-ex" data-ei="${ei}" aria-label="Swap ${esc(ex.name)} for a similar exercise">⇄ Swap</button><button class="btn sm" data-act="rest-now" data-ei="${ei}">Rest</button></div>
     </section>`;
   }).join('');
   return `${exHtml}
@@ -1107,7 +1115,7 @@ function viewProgram() {
 function showSummary(w, prs) {
   const st = workoutStats(w);
   const next = w.exercises.map(ex => {
-    const sg = suggest({ name: ex.name, ...ex.target, sets: ex.target.sets, inc: ex.inc, start: ex.start, prog: ex.prog, progWeeks: ex.progWeeks });
+    const sg = suggest({ name: ex.name, ...ex.target, sets: ex.target.sets, inc: ex.inc, start: ex.start, prog: ex.prog, progWeeks: ex.progWeeks }, w.dayName);
     return `<div class="pr"><span class="spacer">${esc(ex.name)}</span><b class="num">${sg.w != null ? fmtN(sg.w) : '—'}</b><span class="muted small">${sg.cls === 'up' ? '▲' : sg.cls === 'down' ? '▼' : '='}</span></div>`;
   }).join('');
   openSheet(`<div class="stack"><div class="eyebrow">Workout saved · ${fmtDate(w.date)}</div><div class="h2">${esc(w.dayName)}</div></div>
@@ -1218,20 +1226,86 @@ function programMetaSheet() {
       }
     });
 }
+/* ---------- exercise swaps: alternatives grouped by the muscle they train ---------- */
+const LIB = {
+  chest_press: { label: 'Chest presses', ex: ['Bench Press (Barbell)', 'Incline Bench Press (Barbell)', 'Bench Press (Dumbbell)', 'Incline Bench Press (Dumbbell)', 'Machine Chest Press', 'Hammer Strength Chest Press', 'Smith Machine Bench Press', 'Smith Machine Incline Press', 'Weighted Dips', 'Push-Up (Weighted)'] },
+  chest_fly: { label: 'Chest flyes', ex: ['Cable Crossover', 'Pec Deck', 'Fly (Dumbbell)', 'Incline Fly (Dumbbell)', 'Low-to-High Cable Fly', 'Machine Fly'] },
+  back_vertical: { label: 'Lats (vertical pulls)', ex: ['Chin-Up (Weighted)', 'Pull-Up (Weighted)', 'Lat Pulldown', 'Close-Grip Lat Pulldown', 'Machine Pulldown', 'Assisted Pull-Up'] },
+  back_row: { label: 'Upper back (rows)', ex: ['Bent Over Row (Barbell)', 'Pendlay Row (Barbell)', 'Row (Dumbbell)', 'Chest-Supported Row', 'Seated Cable Row', 'T-Bar Row', 'Machine Row', 'Hammer Strength Row'] },
+  lat_iso: { label: 'Lats (isolation)', ex: ['Pullover (Dumbbell)', 'Cable Pullover', 'Straight-Arm Pulldown', 'Machine Pullover'] },
+  quad_compound: { label: 'Quads (compound)', ex: ['Squat (Barbell)', 'Leg Press', 'Hack Squat', 'Front Squat (Barbell)', 'Smith Machine Squat', 'Bulgarian Split Squat', 'Goblet Squat', 'Pendulum Squat'] },
+  quad_iso: { label: 'Quads (isolation)', ex: ['Leg Extension', 'Single-Leg Leg Extension', 'Sissy Squat', 'Reverse Nordic'] },
+  hinge: { label: 'Hamstrings & glutes (hinges)', ex: ['Good Morning', 'Stiff Leg Deadlift', 'Romanian Deadlift (Barbell)', 'Romanian Deadlift (Dumbbell)', 'Deadlift (Barbell)', 'Hip Thrust (Barbell)', 'Glute Bridge', 'Back Extension (Weighted)', 'Cable Pull-Through'] },
+  ham_curl: { label: 'Hamstrings (curls)', ex: ['Leg Curl', 'Seated Leg Curl', 'Lying Leg Curl', 'Nordic Curl', 'Single-Leg Leg Curl'] },
+  delts_press: { label: 'Shoulders (compound)', ex: ['Seated Overhead Press (Barbell)', 'Overhead Press (Barbell)', 'Shoulder Press (Dumbbell)', 'Machine Shoulder Press', 'Smith Machine Shoulder Press', 'Arnold Press', 'Upright Row (Barbell)', 'Upright Row (Cable)'] },
+  delts_iso: { label: 'Shoulders (isolation)', ex: ['Lateral Raise (Dumbbell)', 'Lateral Raise (Cable)', 'Machine Lateral Raise', 'Rear Delt Fly', 'Reverse Pec Deck', 'Face Pull'] },
+  biceps: { label: 'Biceps', ex: ['Bicep Curl (Barbell)', 'Bicep Curl (Dumbbell)', 'Bicep Curl (Cable)', 'EZ-Bar Curl', 'Hammer Curl', 'Preacher Curl', 'Machine Curl', 'Incline Curl (Dumbbell)'] },
+  triceps: { label: 'Triceps', ex: ['Skull Crusher (Barbell)', 'Tricep Pushdown (Cable)', 'Tricep Extension (Dumbbell)', 'Overhead Cable Extension', 'Close-Grip Bench Press', 'JM Press', 'Machine Dip', 'Rope Pushdown'] },
+  calves: { label: 'Calves', ex: ['Standing Calf Raise', 'Seated Calf Raise', 'Leg Press Calf Raise', 'Smith Machine Calf Raise', 'Single-Leg Calf Raise (Dumbbell)'] },
+  abs: { label: 'Abs', ex: ['Cable Crunch', 'Machine Crunch', 'Hanging Leg Raise', 'Ab Wheel Rollout', 'Decline Crunch (Weighted)', 'Weighted Plank'] }
+};
+const GROUP_RULES = [
+  [/calf/, 'calves'], [/crunch|leg raise|ab wheel|plank|sit-?up/, 'abs'], [/leg curl|nordic curl|ham(string)? curl/, 'ham_curl'],
+  [/leg extension|sissy|reverse nordic/, 'quad_iso'], [/pushdown|skull|tricep|jm press|close-grip bench|kickback/, 'triceps'], [/curl/, 'biceps'],
+  [/lateral|rear delt|face pull|reverse (pec|fly)/, 'delts_iso'], [/pullover|straight-arm|pull-through/, (k) => k.includes('pull-through') ? 'hinge' : 'lat_iso'],
+  [/fly|flye|crossover|pec dec/, 'chest_fly'], [/pulldown|pull-?up|chin/, 'back_vertical'],
+  [/upright row|overhead press|shoulder press|seated press|military|arnold|ohp/, 'delts_press'], [/row/, 'back_row'],
+  [/bench|chest press|dip|push-?up/, 'chest_press'], [/squat|leg press|lunge|split|step-?up/, 'quad_compound'],
+  [/deadlift|rdl|good morning|hip thrust|bridge|back extension/, 'hinge']
+];
+function groupOf(name) {
+  const k = exKey(name);
+  for (const g in LIB) if (LIB[g].ex.some(e => exKey(e) === k)) return g;
+  for (const [re, g] of GROUP_RULES) if (re.test(k)) return typeof g === 'function' ? g(k) : g;
+  return null;
+}
+const barLoaded = n => /\(barbell\)|^(bench press|squat|deadlift|good morning|stiff leg deadlift|close-grip bench press|jm press|t-bar row)\b/i.test(n) && !/curl|skull|upright/i.test(n);
+function lastTop(key, dayName) {
+  const h = historyFor(key, dayName)[0]; if (!h) return null;
+  return Math.max(...workingSets(h.ex).map(s => num(s.w) || 0)) || null;
+}
+function swapSheet(ei) {
+  const ex = S.active.exercises[ei]; const g = groupOf(ex.name);
+  const opts = g ? LIB[g].ex.filter(n => exKey(n) !== ex.key) : [];
+  const logged = ex.sets.some(s => s.done);
+  openSheet(`<div class="stack"><div class="eyebrow">Swap ${esc(ex.name)}</div><div class="h3">${g ? 'Same muscle: ' + esc(LIB[g].label) : 'Swap exercise'}</div>
+      <div class="muted small">Same sets and reps (${ex.target.sets} × ${rangeTxt(ex.target)}). Each exercise keeps its own weight history.${logged ? ' Sets you already checked off move to the new exercise.' : ''}</div></div>
+    ${opts.length ? `<div class="swaplist">${opts.map(n => { const tw = lastTop(exKey(n), S.active.dayName); return `<button class="swapopt" data-act="pick" data-n="${esc(n)}"><span>${esc(n)}</span><small>${tw ? 'last ' + fmtN(tw) + ' ' + unitLbl() : 'not done yet'}</small></button>`; }).join('')}</div>` : '<div class="muted small">No suggestions for this exercise. Type one below.</div>'}
+    <div class="field"><label for="sw-name">Or type another exercise</label><input id="sw-name" autocomplete="off" placeholder="e.g. Machine Chest Press"></div>
+    <label class="row small" for="sw-keep" style="gap:10px;flex-wrap:nowrap"><input type="checkbox" id="sw-keep" style="width:20px;height:20px;flex:none"> Also change it in my program (not just today)</label>
+    <button class="btn block" data-act="custom" id="sw-custom">Swap to typed exercise</button>`,
+    {
+      pick: el => doSwap(ei, el.dataset.n),
+      custom: () => { const n = $('#sw-name').value.trim(); if (n) doSwap(ei, n); else $('#sw-name').focus(); }
+    });
+}
+function doSwap(ei, name) {
+  const ex = S.active.exercises[ei]; const keep = !!($('#sw-keep') && $('#sw-keep').checked); const old = ex.name;
+  ex.name = name; ex.key = exKey(name); ex.bar = barLoaded(name);
+  ex.last = lastSummary(ex.key, S.active.dayName);
+  ex.suggestion = suggest({ name, ...ex.target, inc: ex.inc, prog: ex.prog, progWeeks: ex.progWeeks }, S.active.dayName);
+  if (S.active.deload && ex.suggestion.w) ex.suggestion = { ...ex.suggestion, w: roundTo(ex.suggestion.w * 0.9, stepFor(ex.inc)) };
+  if (keep) {
+    const day = S.program.days.find(d => d.id === S.active.dayId) || S.program.days.find(d => d.name === S.active.dayName);
+    const pe = day && day.exercises.find(e => e.id === ex.exId);
+    if (pe) { pe.name = name; pe.bar = ex.bar; touchProfile(); }
+  }
+  persistActive(); closeSheet(); render(); toast(`Swapped ${old} → ${name}${keep ? ' · saved to program' : ' for today'}`);
+}
 function exMenuSheet(ei) {
   const ex = S.active.exercises[ei];
   const sg = ex.suggestion || {};
   const wu = ex.bar && sg.w ? warmupText(sg.w) : '';
   openSheet(`<div class="h3">${esc(ex.name)}</div>
     ${wu ? `<div class="stack"><div class="eyebrow">Warm-up ramp</div><div class="num">${esc(wu)}</div></div>` : ''}
-    <div class="field"><label for="x-name">Swap for another exercise</label><input id="x-name" value="${esc(ex.name)}" autocomplete="off"></div>
+    <button class="btn block" data-act="swap">Swap exercise…</button>
     <div class="field"><label for="x-rest">Rest for this exercise (sec)</label><input id="x-rest" inputmode="numeric" value="${esc(ex.rest)}"></div>
     <button class="btn primary block" data-act="save">Save changes</button>
     <div class="row"><button class="btn sm spacer" data-act="rm-set">Remove last set</button><button class="btn sm spacer" data-act="up">Move up</button><button class="btn sm danger spacer" data-act="rm-ex">Remove</button></div>`,
     {
+      swap: () => swapSheet(ei),
       save: () => {
-        const nm = $('#x-name').value.trim(); const r = num($('#x-rest').value);
-        if (nm && nm !== ex.name) { ex.name = nm; ex.key = exKey(nm); ex.last = lastSummary(ex.key); const sg2 = suggest({ name: nm, ...ex.target, inc: ex.inc, prog: ex.prog, progWeeks: ex.progWeeks }); ex.suggestion = sg2; ex.bar = ex.bar; }
+        const r = num($('#x-rest').value);
         if (r) ex.rest = r;
         persistActive(); closeSheet(); render();
       },
@@ -1255,7 +1329,7 @@ function addExerciseSheet() {
         const name = $('#a-name').value.trim(); if (!name) { $('#a-err').textContent = 'Give it a name.'; return; }
         let lo = num($('#a-min').value) || 8, hi = num($('#a-max').value) || lo; if (hi < lo) [lo, hi] = [hi, lo];
         const pe = { id: uid(), name, sets: Math.max(1, Math.round(num($('#a-sets').value) || 3)), repMin: lo, repMax: hi, rpe: num($('#a-rpe').value), prog: 'double', progWeeks: 4, rest: num($('#a-rest').value) || S.settings.defaultRest, inc: S.settings.unit === 'kg' ? 2.5 : 5 };
-        S.active.exercises.push(buildActiveExercise(pe, false)); persistActive(); closeSheet(); render();
+        S.active.exercises.push(buildActiveExercise(pe, false, S.active.dayName)); persistActive(); closeSheet(); render();
       }
     });
 }
@@ -1346,6 +1420,7 @@ const ACTS = {
   'add-set': el => { const ex = S.active.exercises[+el.dataset.ei]; ex.sets.push({ w: '', reps: '', rpe: '', done: false }); persistActive(); render(); },
   'rest-now': el => { const ex = S.active.exercises[+el.dataset.ei]; startRest(ex.rest || S.settings.defaultRest, ex.name); },
   'ex-menu': el => exMenuSheet(+el.dataset.ei),
+  'swap-ex': el => swapSheet(+el.dataset.ei),
   'add-ex': () => addExerciseSheet(),
   finish: () => finishWorkout(),
   discard: () => confirmSheet('Discard this workout?', 'Every set logged in this session will be thrown away.', 'Discard', discardWorkout),
